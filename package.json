@@ -1,0 +1,16 @@
+{
+  "name": "inst",
+  "version": "1.0.0",
+  "main": "inst.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@vscode/sudo-prompt": "^9.3.1",
+    "lzma-native": "^8.0.6"
+  }
+}
