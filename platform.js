@@ -45,7 +45,7 @@ function dirExists(fpath) {
   }
 }
 
-class Platform {
+module.exports = class Platform {
   arch;
   platform;
   ramsize;
@@ -68,7 +68,7 @@ class Platform {
     return appdir;
   }
 
-  extractStuff(xzpath, outpath) {
+  extractStuff(xzpath, outpath, ep = null) {
     return new Promise((resolve, reject) => {
       fs.writeFileSync(outpath, "");
       const input = fs.createReadStream(xzpath);
@@ -78,7 +78,8 @@ class Platform {
       input.on('data', (chunk) => {
         processedbytes += chunk.length;
         const percent = ((processedbytes / totalsize) * 100).toFixed(2);
-        process.stdout.write(`\rDecompressing... ${percent}%`);
+        process.stdout.write(`\rDecompressing ${path.basename(xzpath)}: ${percent}%`);
+        if (ep) ep(`\rDecompressing ${path.basename(xzpath)}: ${percent}%`);
       });
       input.on('error', reject);
       output.on('error', reject);
@@ -92,8 +93,8 @@ class Platform {
     })
   }
 
-  extractImage(xzpath, outpath) {
-    return this.extractStuff(xzpath, outpath);
+  extractImage(xzpath, outpath, ep) {
+    return this.extractStuff(xzpath, outpath, ep);
   }
 
   switchArch() {
@@ -105,7 +106,7 @@ class Platform {
     return false;
   }
 
-  downloadStuff(url, outputpath) {
+  downloadStuff(url, outputpath, dp = null) {
     return new Promise((resolve, reject) => {
       const file = fs.createWriteStream(outputpath);
       https.get(url, { rejectUnauthorized: authorize }, (response) => {
@@ -119,9 +120,11 @@ class Platform {
           downloadedSize += chunk.length;
           if (!isNaN(totalSize)) {
             const percent = ((downloadedSize / totalSize) * 100).toFixed(2);
-            process.stdout.write(`\rDownloading: ${percent}%`);
+            process.stdout.write(`\rDownloading ${path.basename(outputpath)}: ${percent}%`);
+            if (dp) dp(`\rDownloading ${path.basename(outputpath)}: ${percent}%`);
           } else {
-            process.stdout.write(`\rDownloading: ${downloadedSize} bytes`);
+            process.stdout.write(`\rDownloading ${path.basename(outputpath)}: ${downloadedSize} bytes`);
+            if (dp) dp(`\rDownloading ${path.basename(outputpath)}: ${downloadedSize} bytes`);
           }
         });
         response.pipe(file);
@@ -159,10 +162,10 @@ class Platform {
     return path.join(this.appdatadir, biospath);
   }
 
-  async downloadImage(outputpath) {
+  async downloadImage(outputpath, dp) {
     if (!this.switchArch()) throw new Error("Unsupported architecture");
     const url = this.arch === "arm64" ? arm64imgurl : x86_64imgurl;
-    await this.downloadStuff(url, outputpath);
+    await this.downloadStuff(url, outputpath, dp);
   }
 
 
@@ -178,7 +181,7 @@ class Platform {
   getLinuxPMCommand(pm, qemupkg) {
     switch (pm) {
       case 'apt':
-        return `apt install -y ${qemupkg}`;
+        return `apt-get install -y ${qemupkg}`;
       case 'dnf':
         return `dnf install -y ${qemupkg}`;
       case 'pacman':
@@ -224,62 +227,85 @@ class Platform {
     return null;
   }
 
-  installQemuLinux() {
+  async installQemuLinux(dp = null) {
     const pkgs = this.getLinuxQemuPkg();
-    if (pkgs === "") return; //already installed
+    if (pkgs === "") {
+      console.log("qemu already installed..\n");
+      if (dp) dp("qemu already installed..\n");
+      return;
+    }//already installed
     const pkgcommand = this.getLinuxPMCommand(this.getLinuxPM(), pkgs);
-    sudo.exec(pkgcommand, {}, (err, stderr) => {
-      if (err) {
-        throw err;
-      }
-      if(stderr) {
-        console.warn(stderr);
-      }
-    });
+    console.log("Installing QEMU");
+    if (dp) dp("Installing QEMU...");
+    await new Promise((resolve, reject) => {
+      sudo.exec(pkgcommand, { name: "Install QEMU" }, (err, stdout, stderr) => {
+        if (err) {
+          if (dp) dp(err.message);
+          reject(err);
+          return;
+        }
+        if (stderr) {
+          console.warn(stderr);
+          if (dp) dp(stderr)
+        }
+        if (this.getLinuxQemuPkg() !== "") {
+          if (dp) dp("Failed to install QEMU. Please check your internet connection.");
+          reject(new Error("Failed to install QEMU"));
+        } else {
+          if (dp) dp("QEMU has been installed.");
+          resolve();
+        }
+      });
+    })
   }
 
-  whpxEnabled() {
-    return new Promise((resolve, reject)=>{
-    exec("dism /online /Get-FeatureInfo /FeatureName:HypervisorPlatform", {shell:"cmd.exe"}, (err, stdout, stderr)=>{
-      if(err) {
-        reject(err);
-        return;
-      }
-      if(stdout && stdout.includes("State : Disabled")) {
-        resolve(false);
-      } else {
-        resolve(true);
-      }
-    })
+  whpxEnabled(dp = null) {
+    if (dp) dp("Checking if whpx is on...")
+    return new Promise((resolve, reject) => {
+      exec("dism /online /Get-FeatureInfo /FeatureName:HypervisorPlatform", { shell: "cmd.exe" }, (err, stdout, stderr) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        if (stdout && stdout.includes("State : Disabled")) {
+          if (dp) dp("whpx is on...")
+          resolve(false);
+        } else {
+          if (dp) dp("whpx is off...")
+          resolve(true);
+        }
+      })
     })
   }
-  
+
   enableWhpx() {
-    return new Promise((resolve, reject)=>{
-    sudo.exec("dism /online /Enable-Feature /FeatureName:HypervisorPlatform /All /NoRestart", {name: "Enable Windows Hypervisor Platform"}, (err, stderr)=>{
-      if(err) {
-        console.error(stderr);
-      }
-      if(stderr) {
-        console.warn(stderr);
-      }
-      resolve();
-    })
+    return new Promise((resolve, reject) => {
+      if (dp) dp("Turning whpx on...")
+      sudo.exec("dism /online /Enable-Feature /FeatureName:HypervisorPlatform /All /NoRestart", { name: "Enable Windows Hypervisor Platform" }, (err, stderr) => {
+        if (err) {
+          console.error(stderr);
+        }
+        if (stderr) {
+          console.warn(stderr);
+        }
+        resolve();
+      })
     })
   }
 
-  async installQemuWindows() {
-    if(!await this.whpxEnabled()) {
-      await this.enableWhpx();
-      if(!await this.whpxEnabled()) throw new Error("Failed to enable wphx");
+  async installQemuWindows(dp = null) {
+    if (!await this.whpxEnabled(dp)) {
+      await this.enableWhpx(dp);
+      if (!await this.whpxEnabled()) throw new Error("Failed to enable wphx");
     }
     if (!dirExists(this.getQemuPath())) {
       fs.mkdirSync(this.getQemuPath(), { recursive: true });
     } else {
+      if (dp) dp("QEMU is already installed...");
       return;
     }
-    await this.downloadStuff(qemuurl, this.getQemuXzPath());
-    await this.extractStuff(this.getQemuXzPath(), this.getQemuTarPath());
+    await this.downloadStuff(qemuurl, this.getQemuXzPath(), dp);
+    await this.extractStuff(this.getQemuXzPath(), this.getQemuTarPath(), dp);
     await new Promise((resolve, reject) => {
       let filecnt = 0;
       tar.x({
@@ -287,35 +313,38 @@ class Platform {
         onentry: (entry) => {
           filecnt += 1;
           process.stdout.write(`\r[${filecnt}] Extracting ${entry.path}`);
+          if (dp) dp(`\r[${filecnt}] Extracting ${entry.path}`);
         },
         C: this.appdatadir,
       }).then(() => {
         fs.unlink(this.getQemuTarPath(), () => { });
         resolve();
       }).catch(reject);
-    })    
+    })
   }
 
-  installQemu() {
+  installQemu(dp = null) {
     switch (this.platform) {
       case "linux":
-        return this.installQemuLinux();
+        return this.installQemuLinux(dp);
       case "win32":
-        return this.installQemuWindows();
+        return this.installQemuWindows(dp);
       default:
         throw new Error("Unsupported platform");
     }
   }
 
-  async prepareVM() {
+  async prepareVM(dp) {
+    console.log("preparing vm....");
+    dp("Getting Virtual Machine ready...");
     if (!fileExists(this.getImagePath())) {
-      await this.downloadImage(this.getxzPath());
+      await this.downloadImage(this.getxzPath(), dp);
       if (this.arch === "arm64" && this.platform !== "win32") {
-        this.downloadStuff(biosurl, this.getBiosPath());
+        this.downloadStuff(biosurl, this.getBiosPath(), dp);
       }
-      await this.extractImage(this.getxzPath(), this.getImagePath());
-      this.installQemu();
+      await this.extractImage(this.getxzPath(), this.getImagePath(), dp);
     }
+    await this.installQemu(dp);
   }
 
   linuxQemuCommand() {
@@ -362,20 +391,21 @@ class Platform {
       console.log(`QEMU exited with code ${code}`);
     });
 
-    qemu.stdout.on('data', (data) => {
-      console.log(`QEMU STDOUT: ${data}`);
-    });
+    if (qemu.stderr && qemu.stdout) {
+      qemu.stdout.on('data', (data) => {
+        console.log(`QEMU STDOUT: ${data}`);
+      });
 
-    qemu.stderr.on('data', (data) => {
-      console.error(`QEMU STDERR: ${data}`);
-    });
-
+      qemu.stderr.on('data', (data) => {
+        console.error(`QEMU STDERR: ${data}`);
+      });
+    }
     qemu.on('close', (code) => {
       console.log(`QEMU exited with code ${code}`);
     });
   }
 
-  runVMWindows() {
+  runVMWindows(db = null) {
     const ram =
       Math.round(this.ramsize / RAMRATIO) * 1024;
     const qemu =
@@ -414,38 +444,45 @@ class Platform {
 
     qemu.on('error', (e) => {
       console.error(e);
+      if (dp) dp(e.message)
     });
 
     qemu.on('exit', (code) => {
       console.log(`QEMU exited with code ${code}`);
+      if (dp) dp(`QEMU exited with code ${code}`);
       console.log(qemu.stderr.read())
     });
 
-    qemu.stdout.on('data', (data) => {
-      console.log(`QEMU STDOUT: ${data}`);
-    });
+    if (qemu.stderr && qemu.stdout) {
+      qemu.stdout.on('data', (data) => {
+        console.log(`QEMU STDOUT: ${data}`);
+        if (dp) dp(`QEMU STDOUT: ${data}`);
+      });
 
-    qemu.stderr.on('data', (data) => {
-      console.error(`QEMU STDERR: ${data}`);
-    });
-
+      qemu.stderr.on('data', (data) => {
+        console.error(`QEMU STDERR: ${data}`);
+        if (dp) dp(`QEMU STDERR: ${data}`);
+      });
+    }
     qemu.on('close', (code) => {
       console.log(`QEMU exited with code ${code}`);
+      if (dp) dp(`QEMU exited with code ${code}`);
     });
   }
 
-  runVM() {
+  runVM(dp) {
     switch (this.platform) {
       case "linux":
-        return this.runVMLinux();
+        return this.runVMLinux(dp);
       case "win32":
-        return this.runVMWindows();
+        return this.runVMWindows(dp);
       default:
         throw new Error("Unsupported platform");
     }
   }
 
   constructor() {
+    console.log("Detecting platform...\n");
     this.arch = process.arch;
     this.platform = process.platform;
     this.ramsize = Math.round(os.totalmem() / (1024 ** 3));
@@ -453,7 +490,6 @@ class Platform {
   }
 }
 
-const plat = new Platform();
 // plat.extractImage("mix.mp3.xz").then(() => {
 
 // }).catch((e) => {
