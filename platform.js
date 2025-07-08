@@ -268,10 +268,10 @@ module.exports = class Platform {
           return;
         }
         if (stdout && stdout.includes("State : Disabled")) {
-          if (dp) dp("whpx is on...")
+          if (dp) dp("whpx is off...")
           resolve(false);
         } else {
-          if (dp) dp("whpx is off...")
+          if (dp) dp("whpx is on...")
           resolve(true);
         }
       })

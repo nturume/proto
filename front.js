@@ -12,7 +12,7 @@ var needrestart = false;
 prepbtn.addEventListener("click", async (e) => {
   try {
     await platform.prepareVM((dp) => {
-      if(dp=="whpx is off...") needrestart = true;
+      if(dp==="whpx is off...") needrestart = true;
       console.log(dp);
       konsole.innerText = dp;
     });
