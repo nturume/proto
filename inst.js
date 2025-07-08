@@ -3,9 +3,10 @@ const sudo = require("@vscode/sudo-prompt");
 const fs = require("fs");
 const lzma = require("lzma-native");
 const https = require("https");
-const { spawn } = require('child_process');
+const { spawn, exec } = require('child_process');
 const { execSync } = require('child_process');
 const { stderr, stdout } = require("process");
+const tar = require("tar");
 const path = require('path');
 
 const vmimgpath =
@@ -20,12 +21,25 @@ const arm64imgurl = "";
 
 const x86_64imgurl = "https://localhost:8443/testfile";
 
+const qemuurl = "https://localhost:8443/testfile";
+const qemupath = "qemu";
+const qemuxzpath = "qemu.tar.xz";
+const qemutarpath = "qemu.tar";
+
 const authorize = false;
 const RAMRATIO = 3;
 
-function fileExists(imagePath) {
+function fileExists(fpath) {
   try {
-    return fs.existsSync(imagePath) && fs.statSync(imagePath).isFile();
+    return fs.existsSync(fpath) && fs.statSync(fpath).isFile();
+  } catch (err) {
+    return false;
+  }
+}
+
+function dirExists(fpath) {
+  try {
+    return fs.existsSync(fpath) && fs.statSync(fpath).isDirectory();
   } catch (err) {
     return false;
   }
@@ -54,7 +68,7 @@ class Platform {
     return appdir;
   }
 
-  extractImage(xzpath, outpath) {
+  extractStuff(xzpath, outpath) {
     return new Promise((resolve, reject) => {
       fs.writeFileSync(outpath, "");
       const input = fs.createReadStream(xzpath);
@@ -76,6 +90,10 @@ class Platform {
       });
       input.pipe(decompressor).pipe(output);
     })
+  }
+
+  extractImage(xzpath, outpath) {
+    return this.extractStuff(xzpath, outpath);
   }
 
   switchArch() {
@@ -115,6 +133,18 @@ class Platform {
         reject(err);
       });
     });
+  }
+
+  getQemuXzPath() {
+    return path.join(this.appdatadir, qemuxzpath);
+  }
+
+  getQemuTarPath() {
+    return path.join(this.appdatadir, qemutarpath);
+  }
+
+  getQemuPath() {
+    return path.join(this.appdatadir, qemupath);
   }
 
   getxzPath() {
@@ -202,15 +232,76 @@ class Platform {
       if (err) {
         throw err;
       }
-      console.log(stderr);
+      if(stderr) {
+        console.warn(stderr);
+      }
     });
-    console.log(pkgcommand);
+  }
+
+  whpxEnabled() {
+    return new Promise((resolve, reject)=>{
+    exec("dism /online /Get-FeatureInfo /FeatureName:HypervisorPlatform", {shell:"cmd.exe"}, (err, stdout, stderr)=>{
+      if(err) {
+        reject(err);
+        return;
+      }
+      if(stdout && stdout.includes("State : Disabled")) {
+        resolve(false);
+      } else {
+        resolve(true);
+      }
+    })
+    })
+  }
+  
+  enableWhpx() {
+    return new Promise((resolve, reject)=>{
+    sudo.exec("dism /online /Enable-Feature /FeatureName:HypervisorPlatform /All /NoRestart", {name: "Enable Windows Hypervisor Platform"}, (err, stderr)=>{
+      if(err) {
+        console.error(stderr);
+      }
+      if(stderr) {
+        console.warn(stderr);
+      }
+      resolve();
+    })
+    })
+  }
+
+  async installQemuWindows() {
+    if(!await this.whpxEnabled()) {
+      await this.enableWhpx();
+      if(!await this.whpxEnabled()) throw new Error("Failed to enable wphx");
+    }
+    if (!dirExists(this.getQemuPath())) {
+      fs.mkdirSync(this.getQemuPath(), { recursive: true });
+    } else {
+      return;
+    }
+    await this.downloadStuff(qemuurl, this.getQemuXzPath());
+    await this.extractStuff(this.getQemuXzPath(), this.getQemuTarPath());
+    await new Promise((resolve, reject) => {
+      let filecnt = 0;
+      tar.x({
+        file: this.getQemuTarPath(),
+        onentry: (entry) => {
+          filecnt += 1;
+          process.stdout.write(`\r[${filecnt}] Extracting ${entry.path}`);
+        },
+        C: this.appdatadir,
+      }).then(() => {
+        fs.unlink(this.getQemuTarPath(), () => { });
+        resolve();
+      }).catch(reject);
+    })    
   }
 
   installQemu() {
     switch (this.platform) {
       case "linux":
         return this.installQemuLinux();
+      case "win32":
+        return this.installQemuWindows();
       default:
         throw new Error("Unsupported platform");
     }
@@ -219,7 +310,7 @@ class Platform {
   async prepareVM() {
     if (!fileExists(this.getImagePath())) {
       await this.downloadImage(this.getxzPath());
-      if (this.arch == "arm64") {
+      if (this.arch === "arm64" && this.platform !== "win32") {
         this.downloadStuff(biosurl, this.getBiosPath());
       }
       await this.extractImage(this.getxzPath(), this.getImagePath());
@@ -284,10 +375,71 @@ class Platform {
     });
   }
 
+  runVMWindows() {
+    const ram =
+      Math.round(this.ramsize / RAMRATIO) * 1024;
+    const qemu =
+      this.arch === "x64" ?
+        spawn(`${this.getQemuPath()}\\qemu-system-x86_64.exe`, [
+          '-m', `${ram}`,
+          '-hda', this.getImagePath(),
+          '-accel', 'whpx',
+          '-net', 'nic',
+          '-net', 'user',
+          '-usb',
+          '-device', 'usb-tablet',
+          '-device', 'virtio-serial-pci',
+          '-rtc', 'base=localtime',
+          '-display', 'sdl',
+          '-smp', 'cores=2',
+        ], {
+          stdio: 'inherit',
+          shell: false, stdio: ['ignore', 'pipe', 'pipe']
+        }) : spawn(`${this.getQemuPath()}\\qemu-system-aarch64.exe`, [
+          '-monitor', 'stdio',
+          '-M', 'virt,highmem=off',
+          '-accel', 'whpx',
+          '-cpu', 'host',
+          '-m', `${ram}`,
+          '-bios', this.getBiosPath(),
+          '-device', 'virtio-gpu-pci',
+          '-display', 'default,show-cursor=on',
+          '-device', 'qemu-xhci',
+          '-device', 'usb-kbd',
+          '-device', 'usb-tablet',
+          '-device', 'intel-hda',
+          '-device', 'hda-duplex',
+          '-drive', `file=${this.getImagePath()},format=qcow2,if=virtio,cache=writethrough`
+        ], { stdio: 'inherit', shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+
+    qemu.on('error', (e) => {
+      console.error(e);
+    });
+
+    qemu.on('exit', (code) => {
+      console.log(`QEMU exited with code ${code}`);
+      console.log(qemu.stderr.read())
+    });
+
+    qemu.stdout.on('data', (data) => {
+      console.log(`QEMU STDOUT: ${data}`);
+    });
+
+    qemu.stderr.on('data', (data) => {
+      console.error(`QEMU STDERR: ${data}`);
+    });
+
+    qemu.on('close', (code) => {
+      console.log(`QEMU exited with code ${code}`);
+    });
+  }
+
   runVM() {
     switch (this.platform) {
       case "linux":
         return this.runVMLinux();
+      case "win32":
+        return this.runVMWindows();
       default:
         throw new Error("Unsupported platform");
     }
@@ -308,12 +460,31 @@ const plat = new Platform();
 //   console.error(e);
 // })
 
-plat.prepareVM().then(() => {
-  console.log("downloaded..")
-}).catch((e) => {
-  console.error(e);
-})
+// plat.prepareVM().then(() => {
+//   console.log("downloaded..")
+// }).catch((e) => {
+//   console.error(e);
+// })
 
-// plat.runVM()
+// plat.runVM();
+
+// plat.enableWhpx().then((b)=>{
+//   console.log(b);
+// }).catch((e)=>{
+//   console.error(e);
+// })
+
+// plat.whpxEnabled().then((b)=>{
+//   console.log(b);
+// }).catch((e)=>{
+//   console.error(e);
+// })
+//
+
+// plat.installQemu().then(()=>{
+//   console.log("done.");
+// }).catch((e)=>{
+//   console.error(e);
+// })
 
 // console.log(plat.installQemuLinux());
