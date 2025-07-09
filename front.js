@@ -6,13 +6,11 @@ runbtn.disabled = true;
 
 const platform = window.api.getPlatform();
 var prepared = false;
-var needrestart = false;
 
 
 prepbtn.addEventListener("click", async (e) => {
   try {
     await platform.prepareVM((dp) => {
-      if(dp==="whpx is off...") needrestart = true;
       console.log(dp);
       konsole.innerText = dp;
     });
@@ -29,7 +27,9 @@ runbtn.addEventListener("click", async (e) => {
     alert("Virtual Machine not prepared.");
     return;
   }
-  if(needrestart) {
+  const config = platform.getConfig();
+  console.log(config);
+  if(config.restart) {
     alert("Please restart your computer to finish enabling Hardware Acceleration.");
     return;
   }

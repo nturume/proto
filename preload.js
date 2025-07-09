@@ -6,6 +6,18 @@ contextBridge.exposeInMainWorld('api', {
   getPlatform: () => {
     const instance = new Platform();
     return {
+      getConfig: () => {
+        try {
+          return instance.getConfig()
+        } catch (e) {
+          throw e;
+        }
+      },
+      setConfig: (config) => {
+        try {
+          instance.setConfig(config);
+        } catch (e) { throw e; }
+      },
       getDetails: () => {
         return {
           arch: instance.arch,

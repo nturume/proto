@@ -4,7 +4,7 @@ const fs = require("fs");
 const lzma = require("lzma-native");
 const https = require("https");
 const { spawn, exec } = require('child_process');
-const { execSync } = require('child_process');
+const { execSync, spawnSync } = require('child_process');
 const { stderr, stdout } = require("process");
 const tar = require("tar");
 const path = require('path');
@@ -49,6 +49,7 @@ module.exports = class Platform {
   arch;
   platform;
   ramsize;
+  appdatadir;
 
   getAppDataDir(appName) {
     const home = os.homedir();
@@ -65,7 +66,27 @@ module.exports = class Platform {
       fs.mkdirSync(appdir, { recursive: true });
       console.log('Created app data directory:', appdir);
     }
+    const configfile = path.join(appdir, "proto.json");
+    if (!fileExists(configfile)) {
+      fs.writeFileSync(configfile, JSON.stringify({
+        restart: false
+      }));
+    }
     return appdir;
+  }
+
+  getConfig() {
+    const configfile = path.join(this.appdatadir, "proto.json");
+    if (!fileExists(configfile)) {
+      fs.writeFileSync(configfile, JSON.stringify({
+        restart: false
+      }));
+    }
+    return JSON.parse(fs.readFileSync(configfile));
+  }
+
+  setConfig(config) {
+    fs.writeFileSync(JSON.stringify(config));
   }
 
   extractStuff(xzpath, outpath, ep = null) {
@@ -274,6 +295,7 @@ module.exports = class Platform {
           if (dp) dp("whpx is on...")
           resolve(true);
         }
+        this.setConfig(config);
       })
     })
   }
@@ -294,10 +316,15 @@ module.exports = class Platform {
   }
 
   async installQemuWindows(dp = null) {
+    const config = this.getConfig();
+    config.restart = false;
     if (!await this.whpxEnabled(dp)) {
+      config.restart = true;
+      this.setConfig(config);
       await this.enableWhpx(dp);
       if (!await this.whpxEnabled()) throw new Error("Failed to enable wphx");
     }
+    this.setConfig(config);
     if (!dirExists(this.getQemuPath())) {
       fs.mkdirSync(this.getQemuPath(), { recursive: true });
     } else {
@@ -313,7 +340,7 @@ module.exports = class Platform {
         onentry: (entry) => {
           filecnt += 1;
           process.stdout.write(`\r[${filecnt}] Extracting ${entry.path}`);
-          if (dp) dp(`\r[${filecnt}] Extracting ${entry.path}`);
+          if (dp) dp(`[${filecnt}] Extracting ${entry.path}`);
         },
         C: this.appdatadir,
       }).then(() => {
@@ -323,28 +350,75 @@ module.exports = class Platform {
     })
   }
 
+
+  getMacosQemuCmd() {
+    switch (this.arch) {
+      case "arm64":
+        return "qemu-system-aarch64";
+      case "x64": {
+        return "qemu-system-x86_64";
+      }
+      default:
+        throw new Error("Unsupported architecture");
+    }
+  }
+
+  installQemuMacOS(dp = null) {
+    const brewcmd = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"';
+    if (this.commandExists(this.getMacosQemuCmd())) {
+      console.log("QEMU already installed.");
+      if (dp) dp("QEMU already installed.");
+      return;
+    }
+
+    if (!this.commandExists("brew")) {
+      console.log('Installing Homebrew.');
+      if (dp) dp('Installing Homebrew');
+      try {
+        execSync(
+          '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
+          { stdio: 'inherit', env: process.env }
+        );
+        const brewPath = '/opt/homebrew/bin/brew';
+        if (fs.existsSync(brewPath)) {
+          process.env.PATH = `/opt/homebrew/bin:` + process.env.PATH;
+        }
+
+        if (!this.commandExists("brew")) {
+          throw new Error("Failed to install Brew.");
+        }
+
+        console.log('Homebrew installed successfully.');
+        if (dp) dp('Homebrew installed successfully.');
+      } catch (err) {
+        console.error(err);
+        if (dp) dp(err.message);
+        throw err;
+      }
+    }
+    console.log("Installing QEMU...");
+    if (dp) dp("Installing QEMU...");
+    const install = spawnSync('brew', ['install', 'qemu'], { stdio: 'inherit' });
+    if (install.status !== 0 || !this.commandExists(this.getMacosQemuCmd())) {
+      if (dp) dp(install.stderr());
+      console.error(install.stderr);
+      throw new Error(`Failed to install QEMU: ${install.stderr}`);
+    }
+    console.log("QEMU installed successfully.");
+    if (dp) dp("QEMU installed successfully.");
+  }
+
   installQemu(dp = null) {
     switch (this.platform) {
       case "linux":
         return this.installQemuLinux(dp);
       case "win32":
         return this.installQemuWindows(dp);
+      case "darwin":
+        return this.installQemuMacOS(dp);
       default:
         throw new Error("Unsupported platform");
     }
-  }
-
-  async prepareVM(dp) {
-    console.log("preparing vm....");
-    dp("Getting Virtual Machine ready...");
-    if (!fileExists(this.getImagePath())) {
-      await this.downloadImage(this.getxzPath(), dp);
-      if (this.arch === "arm64" && this.platform !== "win32") {
-        this.downloadStuff(biosurl, this.getBiosPath(), dp);
-      }
-      await this.extractImage(this.getxzPath(), this.getImagePath(), dp);
-    }
-    await this.installQemu(dp);
   }
 
   linuxQemuCommand() {
@@ -359,7 +433,21 @@ module.exports = class Platform {
     }
   }
 
-  runVMLinux() {
+  async prepareVM(dp) {
+    console.log("preparing vm....");
+    dp("Getting Virtual Machine ready...");
+    if (!fileExists(this.getImagePath())) {
+      await this.downloadImage(this.getxzPath(), dp);
+      await this.extractImage(this.getxzPath(), this.getImagePath(), dp);
+    }
+    if (this.arch === "arm64" && !fileExists(this.getBiosPath())) {
+      this.downloadStuff(biosurl, this.getBiosPath(), dp);
+    }
+    await this.installQemu(dp);
+  }
+
+
+  runVMLinux(dp = null) {
     const ram =
       Math.round(this.ramsize / RAMRATIO) * 1024;
     const qemu =
@@ -372,7 +460,7 @@ module.exports = class Platform {
           '-net', 'user'
         ], { stdio: 'inherit' }) : spawn('qemu-system-aarch64', [
           '-monitor', 'stdio',
-          '-M', 'virt,highmem=off',
+          '-M', 'virt',
           '-accel', 'kvm',
           '-cpu', 'host',
           '-m', `${ram}`,
@@ -389,23 +477,78 @@ module.exports = class Platform {
 
     qemu.on('exit', (code) => {
       console.log(`QEMU exited with code ${code}`);
+      if (dp) dp(`QEMU exited with code ${code}`);
     });
 
     if (qemu.stderr && qemu.stdout) {
       qemu.stdout.on('data', (data) => {
         console.log(`QEMU STDOUT: ${data}`);
+        if (dp) dp(`QEMU STDOUT: ${data}`);
       });
 
       qemu.stderr.on('data', (data) => {
         console.error(`QEMU STDERR: ${data}`);
+        if (dp) dp(`QEMU STDERR: ${data}`);
       });
     }
     qemu.on('close', (code) => {
       console.log(`QEMU exited with code ${code}`);
+      if (dp) dp(`QEMU exited with code ${code}`);
     });
   }
 
-  runVMWindows(db = null) {
+
+  runVMMacos(dp = null) {
+    const ram =
+      Math.round(this.ramsize / RAMRATIO) * 1024;
+    const qemu =
+      this.arch === "x64" ?
+        spawn("qemu-system-x86_64", [
+          '-m', `${ram}`,
+          '-hda', this.getImagePath(),
+          '-accel', 'hvf',
+          '-net', 'nic',
+          '-net', 'user'
+        ], { stdio: 'inherit' }) : spawn('qemu-system-aarch64', [
+          '-monitor', 'stdio',
+          '-M', 'virt,highmem=off',
+          '-accel', 'hvf',
+          '-cpu', 'host',
+          '-m', `${ram}`,
+          '-bios', this.getBiosPath(),
+          '-device', 'virtio-gpu-pci',
+          '-display', 'default,show-cursor=on',
+          '-device', 'qemu-xhci',
+          '-device', 'usb-kbd',
+          '-device', 'usb-tablet',
+          '-device', 'intel-hda',
+          '-device', 'hda-duplex',
+          '-drive', `file=${this.getImagePath()},format=qcow2,if=virtio,cache=writethrough`
+        ], { stdio: 'inherit' });
+
+    qemu.on('exit', (code) => {
+      console.log(`QEMU exited with code ${code}`);
+      if (dp) dp(`QEMU exited with code ${code}`);
+    });
+
+    if (qemu.stderr && qemu.stdout) {
+      qemu.stdout.on('data', (data) => {
+        console.log(`QEMU STDOUT: ${data}`);
+        if (dp) dp(`QEMU STDOUT: ${data}`);
+      });
+
+      qemu.stderr.on('data', (data) => {
+        console.error(`QEMU STDERR: ${data}`);
+        if (dp) dp(`QEMU STDERR: ${data}`);
+      });
+    }
+    qemu.on('close', (code) => {
+      console.log(`QEMU exited with code ${code}`);
+      if (dp) dp(`QEMU exited with code ${code}`);
+    });
+  }
+
+  runVMWindows(dp = null) {
     const ram =
       Math.round(this.ramsize / RAMRATIO) * 1024;
     const qemu =
@@ -427,7 +570,7 @@ module.exports = class Platform {
           shell: false, stdio: ['ignore', 'pipe', 'pipe']
         }) : spawn(`${this.getQemuPath()}\\qemu-system-aarch64.exe`, [
           '-monitor', 'stdio',
-          '-M', 'virt,highmem=off',
+          '-M', 'virt',
           '-accel', 'whpx',
           '-cpu', 'host',
           '-m', `${ram}`,
@@ -476,6 +619,8 @@ module.exports = class Platform {
         return this.runVMLinux(dp);
       case "win32":
         return this.runVMWindows(dp);
+      case "darwin":
+        return this.runVMMacos(dp);
       default:
         throw new Error("Unsupported platform");
     }
