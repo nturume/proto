@@ -1,4 +1,3 @@
-const os = require("os");
 const sudo = require("@vscode/sudo-prompt");
 const fs = require("fs");
 const lzma = require("lzma-native");
@@ -12,12 +11,12 @@ const path = require('path');
 const vmimgpath =
   // "/home/m/Desktop/VirtualBoxes/ubuntu/ubuntu.qcow2"
   "VMIMAGE.qcow2";
-const biospath = "bios.efi";
+const biospath = "efi.img";
 
 const vmxzpath = "VMIMAGE.qcow2.xz";
 
-const biosurl = ""
-const arm64imgurl = "";
+const biosurl = "https://localhost:8443/testbios"
+const arm64imgurl = "https://localhost:8443/testfile";
 
 const x86_64imgurl = "https://localhost:8443/testfile";
 
@@ -128,6 +127,7 @@ module.exports = class Platform {
   }
 
   downloadStuff(url, outputpath, dp = null) {
+    console.log(`Downloading ${path.basename(outputpath)} url ${url}...`);
     return new Promise((resolve, reject) => {
       const file = fs.createWriteStream(outputpath);
       https.get(url, { rejectUnauthorized: authorize }, (response) => {
@@ -434,10 +434,12 @@ module.exports = class Platform {
   }
 
   async prepareVM(dp) {
-    console.log("preparing vm....");
+    if (!fileExists(this.getImagePath())) { }
+    console.log("preparing VM....");
     dp("Getting Virtual Machine ready...");
     if (!fileExists(this.getImagePath())) {
-      await this.downloadImage(this.getxzPath(), dp);
+      console.log("================1");
+      await this.downloadImage(this.getxzPath(), dp); console.log("================2ss");
       await this.extractImage(this.getxzPath(), this.getImagePath(), dp);
     }
     if (this.arch === "arm64" && !fileExists(this.getBiosPath())) {
@@ -499,8 +501,12 @@ module.exports = class Platform {
 
 
   runVMMacos(dp = null) {
-    const ram =
+    let ram =
       Math.round(this.ramsize / RAMRATIO) * 1024;
+    if (ram > 3000) ram = 3000;
+    console.log("BIOS PATH:", this.getBiosPath())
+    // /Users/nirfeinstein/Library/Application Support/Proto/efi.img
+    // /Users/nirfeinstein/Library/Application Support/Proto/efi.img
     const qemu =
       this.arch === "x64" ?
         spawn("qemu-system-x86_64", [
@@ -514,8 +520,9 @@ module.exports = class Platform {
           '-M', 'virt,highmem=off',
           '-accel', 'hvf',
           '-cpu', 'host',
+          '-smp', '4',
           '-m', `${ram}`,
-          '-bios', this.getBiosPath(),
+          '-bios', `${this.getBiosPath()}`,
           '-device', 'virtio-gpu-pci',
           '-display', 'default,show-cursor=on',
           '-device', 'qemu-xhci',
@@ -524,7 +531,12 @@ module.exports = class Platform {
           '-device', 'intel-hda',
           '-device', 'hda-duplex',
           '-drive', `file=${this.getImagePath()},format=qcow2,if=virtio,cache=writethrough`
-        ], { stdio: 'inherit' });
+        ], {
+          stdio: 'inherit', env: {
+            ...process.env,
+            PATH: '/opt/homebrew/bin:' + process.env.PATH
+          }
+        });
 
     qemu.on('exit', (code) => {
       console.log(`QEMU exited with code ${code}`);
@@ -669,3 +681,4 @@ module.exports = class Platform {
 // })
 
 // console.log(plat.installQemuLinux());
+
